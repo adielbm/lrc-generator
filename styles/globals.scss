@@ -1,46 +1,8 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
-html,
-body {
-  padding: 0;
-  direction: ltr;
-  margin: 0;
-  background: #a5c9ff;
-  font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Oxygen,
-    Ubuntu, Cantarell, Fira Sans, Droid Sans, Helvetica Neue, sans-serif;
-}
-
-a {
-  color: inherit;
-  text-decoration: none;
-}
-
-* {
-  box-sizing: border-box;
-}
-
-
-.btn-file input[type=file] {
-  position: absolute;
-  top: 0;
-  right: 0;
-  height: 100%;
-  text-align: right;
-  width: 100%;
-  opacity: 0;
-  outline: none;
-  background: white;
-  cursor: inherit;
-  display: block;
-}
-button, input {
-  overflow: visible;
-}
-button, input, optgroup, select, textarea {
-  margin: 0;
-  font-family: inherit;
-  font-size: inherit;
-  line-height: inherit;
+@layer base {
+  html,
+  body {
+    @apply antialiased bg-white dark:bg-gray-900 text-gray-900 dark:text-gray-100;
+  }
 }

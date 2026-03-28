@@ -1,215 +1,813 @@
-import Head from "next/head";
-import { createContext, useEffect, useMemo, useRef, useState } from "react";
-import Line from "../components/Line";
-import LinesTable from "../components/LinesTable";
-import { Audiotime } from "../context/Audiotime";
-import { LyricsContext } from "../context/Ly";
-import getLrc from "../utilits/getLrc";
-import download from "../utilits/saveFile";
-import secendsFormat from "../utilits/secendsFormat";
+import Head from 'next/head';
+import { useState, useRef, useEffect, useMemo } from 'react';
+import { Upload, Link as LinkIcon, Download, Play, Pause, X } from 'lucide-react';
+
+function formatTime(seconds) {
+  if (isNaN(seconds) || seconds === null) return '00:00.00';
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  const ms = Math.floor((seconds % 1) * 100);
+  return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}.${ms.toString().padStart(2, '0')}`;
+}
+
+function extractYouTubeId(url) {
+  if (!url) return null;
+  const regex = /(?:youtube\.com\/watch\?v=|youtu\.be\/|youtube\.com\/embed\/)([^&\n?#]+)/;
+  const match = url.match(regex);
+  return match ? match[1] : null;
+}
+
+function isYouTubeUrl(url) {
+  return extractYouTubeId(url) !== null;
+}
 
 export default function Home() {
-  const [audio, setAudio] = useState();
+  const [audioUrl, setAudioUrl] = useState('');
+  const [ytInput, setYtInput] = useState('');
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(0);
 
-  // title song
-  const [titleSong, setTitleSong] = useState();
-  // album song
-  const [albumSong, setAlbumSong] = useState();
-  // artist song
-  const [artistSong, setArtistSong] = useState();
+  const [metadata, setMetadata] = useState({ title: '', artist: '', album: '', by: '', comments: '' });
+  const [formatMode, setFormatMode] = useState('A1'); // 'A1' or 'A2'
+  
+  const [rawText, setRawText] = useState('');
+  const [lines, setLines] = useState([]);
+  const [activeIndex, setActiveIndex] = useState({ line: 0, word: 0 });
+  const [showEditMode, setShowEditMode] = useState(true); // True = show textarea, False = show edit button
+  const [mobilePanelType, setMobilePanelType] = useState(null); // 'tags' | 'lyrics' | null
 
-  const [lyrics, setLyrics] = useState([]);
-  const value = useMemo(() => ({ lyrics, setLyrics }), [lyrics]);
+  const playerRef = useRef(null);
+  const scrollRef = useRef(null);
+  const isYouTube = isYouTubeUrl(audioUrl);
+  const ytPlayerRef = useRef(null);
 
-  const [audiotime, setAudiotime] = useState([]);
-  const valueAudiotime = useMemo(
-    () => ({ audiotime, setAudiotime }),
-    [audiotime]
-  );
-
-  const audioEl = useRef(null);
-  const textareaEl = useRef(null);
-
-  const copyTextToLyrics = () => {
-    const arr = textareaEl.current.value.split(/\r\n|\n\r|\n|\r/);
-    let lyrics = arr.map((line) => ({ text: line, time: null }));
-    console.log(lyrics);
-    lyrics = lyrics.filter((line) => {
-      if (line.text.length < 2) {
-        return false;
+  const destroyYouTubePlayer = () => {
+    if (ytPlayerRef.current && typeof ytPlayerRef.current.destroy === 'function') {
+      try {
+        ytPlayerRef.current.destroy();
+      } catch (e) {
+        // Ignore intermittent teardown errors from the YouTube iframe API.
       }
-      return true;
-    });
-    console.log(lyrics);
-    setLyrics(lyrics);
-    textareaEl.current.value = "";
-  };
+    }
+    ytPlayerRef.current = null;
 
-  const handleTimeUpdate = (event) => {
-    console.log(audioEl);
-    setAudiotime(secendsFormat(event.target.currentTime));
-  };
-
-  const handleExportFile = () => {
-    download(
-      `${titleSong}.lrc`,
-      getLrc(
-        lyrics,
-        titleSong,
-        artistSong,
-        albumSong,
-        secendsFormat(audioEl.current.duration)
-      )
-    );
-  };
-
-  const addFile = (e) => {
-    if (e.target.files[0]) {
-      setTitleSong(e.target.files[0].name.split(".")[0]);
-      setAudio(URL.createObjectURL(e.target.files[0]));
-      audioEl.current.load();
-      audioEl.current.playbackRate = 2;
-      console.log(audioEl);
+    const playerContainer = document.getElementById('yt-player');
+    if (playerContainer) {
+      playerContainer.innerHTML = '';
     }
   };
 
-  // fucntion to change playbackRate
-  const changePlaybackRate = (rate) => {
-    audioEl.current.playbackRate = rate;
+  const canCallYouTube = (method) => {
+    return !!(ytPlayerRef.current && typeof ytPlayerRef.current[method] === 'function');
+  };
+
+  const getYouTubeCurrentTime = () => {
+    return canCallYouTube('getCurrentTime') ? ytPlayerRef.current.getCurrentTime() : 0;
+  };
+
+  const seekYouTube = (time) => {
+    if (canCallYouTube('seekTo')) {
+      ytPlayerRef.current.seekTo(Math.max(0, time), true);
+    }
+  };
+
+  const playYouTube = () => {
+    if (canCallYouTube('playVideo')) {
+      ytPlayerRef.current.playVideo();
+    }
+  };
+
+  const pauseYouTube = () => {
+    if (canCallYouTube('pauseVideo')) {
+      ytPlayerRef.current.pauseVideo();
+    }
+  };
+
+  // Memoized: Find current playing word (A2 mode)
+  const currentPlayingWord = useMemo(() => {
+    if (!isPlaying || formatMode !== 'A2') return null;
+    
+    let active = null;
+    for (let i = 0; i < lines.length; i++) {
+      for (let j = 0; j < lines[i].words.length; j++) {
+        const word = lines[i].words[j];
+        if (word.time !== null && currentTime >= word.time - 0.1) {
+          active = { line: i, word: j };
+        }
+      }
+    }
+    return active;
+  }, [isPlaying, currentTime, lines, formatMode]);
+
+  // Memoized: Find current playing line (A1 mode) 
+  const currentPlayingLine = useMemo(() => {
+    if (!isPlaying || formatMode !== 'A1') return null;
+    
+    let active = null;
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      if (line.time !== null && currentTime >= line.time - 0.1) {
+        active = i;
+      }
+    }
+    return active;
+  }, [isPlaying, currentTime, lines, formatMode]);
+
+  // YouTube API initialization
+  useEffect(() => {
+    if (!isYouTube) {
+      destroyYouTubePlayer();
+      return;
+    }
+
+    let isEffectActive = true;
+    
+    const loadYouTubeAPI = () => {
+      if (!isEffectActive) return;
+
+      if (window.YT && window.YT.Player) {
+        initYouTubePlayer();
+      } else {
+        if (!document.querySelector('script[src="https://www.youtube.com/iframe_api"]')) {
+          const tag = document.createElement('script');
+          tag.src = 'https://www.youtube.com/iframe_api';
+          const firstScriptTag = document.getElementsByTagName('script')[0];
+          if (firstScriptTag && firstScriptTag.parentNode) {
+            firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+          } else {
+            document.head.appendChild(tag);
+          }
+        }
+        
+        window.onYouTubeIframeAPIReady = initYouTubePlayer;
+      }
+    };
+
+    const initYouTubePlayer = () => {
+      if (!isEffectActive) return;
+
+      const videoId = extractYouTubeId(audioUrl);
+      if (!videoId) return;
+
+      const playerContainer = document.getElementById('yt-player');
+      if (!playerContainer) return;
+
+      if (ytPlayerRef.current && typeof ytPlayerRef.current.loadVideoById === 'function') {
+        ytPlayerRef.current.loadVideoById(videoId);
+        setCurrentTime(0);
+        return;
+      }
+      
+      ytPlayerRef.current = new window.YT.Player('yt-player', {
+        videoId,
+        playerVars: {
+          autoplay: 0,
+          controls: 0,
+          modestbranding: 1,
+        },
+        events: {
+          onStateChange: onPlayerStateChange,
+        },
+      });
+    };
+
+    const onPlayerStateChange = (event) => {
+      if (event.data === window.YT.PlayerState.PLAYING) {
+        setIsPlaying(true);
+      } else if (event.data === window.YT.PlayerState.PAUSED) {
+        setIsPlaying(false);
+      }
+    };
+
+    loadYouTubeAPI();
+
+    // Update YouTube time every 100ms
+    const interval = setInterval(() => {
+      if (ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function') {
+        setCurrentTime(ytPlayerRef.current.getCurrentTime());
+        if (typeof ytPlayerRef.current.getDuration === 'function') {
+          setDuration(ytPlayerRef.current.getDuration());
+        }
+      }
+    }, 100);
+
+    return () => {
+      isEffectActive = false;
+      clearInterval(interval);
+      destroyYouTubePlayer();
+    };
+  }, [audioUrl, isYouTube]);
+
+  useEffect(() => {
+    // Process rawText when showEditMode changes from true to false (user clicks Load)
+    if (!showEditMode && rawText.trim()) {
+      const newLines = rawText.split('\n').filter(l => l.trim().length > 0).map(line => {
+        const words = line.trim().split(/\s+/).map(w => ({ text: w, time: null }));
+        return { text: line.trim(), time: null, words };
+      });
+      setLines(newLines);
+      setActiveIndex({ line: 0, word: 0 });
+    }
+  }, [showEditMode, rawText]);
+
+
+
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
+      if (e.repeat) return; // Prevent hold-down repeating triggers
+
+      if (e.code === 'Space') {
+        e.preventDefault();
+        if (document.activeElement && document.activeElement.blur) {
+          document.activeElement.blur();
+        }
+        handlePlayPause();
+      } else if (e.code === 'Enter') {
+        e.preventDefault();
+        tagCurrent();
+      } else if (e.code === 'Backspace' || e.code === 'Delete') {
+        e.preventDefault();
+        untagPrevious();
+      } else if (e.code === 'ArrowDown') {
+        e.preventDefault();
+        moveCursor(1);
+      } else if (e.code === 'ArrowUp') {
+        e.preventDefault();
+        moveCursor(-1);
+      } else if (e.code === 'ArrowLeft') {
+        e.preventDefault();
+        if (isYouTubeUrl(audioUrl)) {
+          seekYouTube(getYouTubeCurrentTime() - 2);
+        } else if (playerRef.current) {
+           playerRef.current.currentTime = Math.max(0, playerRef.current.currentTime - 2);
+        }
+      } else if (e.code === 'ArrowRight') {
+        e.preventDefault();
+        if (isYouTubeUrl(audioUrl)) {
+          seekYouTube(getYouTubeCurrentTime() + 2);
+        } else if (playerRef.current) {
+           playerRef.current.currentTime = playerRef.current.currentTime + 2;
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [lines, activeIndex, formatMode, audioUrl]);
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      const activeEl = scrollRef.current.querySelector('.active-tag');
+      if (activeEl) activeEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    }
+  }, [activeIndex]);
+
+  // Setup audio element event listeners - runs after audio is mounted
+  useEffect(() => {
+    const audio = playerRef.current;
+    if (!audio || isYouTube) return;
+
+    const handleTimeUpdate = () => {
+      setCurrentTime(audio.currentTime);
+    };
+
+    const handleEnded = () => {
+      setIsPlaying(false);
+    };
+
+    const handleLoadedMetadata = () => {
+      setDuration(audio.duration);
+    };
+
+    audio.addEventListener('timeupdate', handleTimeUpdate, { passive: true });
+    audio.addEventListener('ended', handleEnded, { passive: true });
+    audio.addEventListener('loadedmetadata', handleLoadedMetadata, { passive: true });
+
+    return () => {
+      audio.removeEventListener('timeupdate', handleTimeUpdate);
+      audio.removeEventListener('ended', handleEnded);
+      audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
+    };
+  }, [audioUrl, isYouTube]);
+
+  // Sync isPlaying state with audio element
+  useEffect(() => {
+    const audio = playerRef.current;
+    if (!audio || isYouTube) return;
+
+    if (isPlaying) {
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(() => {});
+      }
+    } else {
+      audio.pause();
+    }
+  }, [isPlaying, isYouTube]);
+
+  // Sync playbackRate with audio element
+  useEffect(() => {
+    const audio = playerRef.current;
+    if (audio && !isYouTube) {
+      audio.playbackRate = playbackRate;
+    }
+  }, [playbackRate, isYouTube]);
+
+  // Sync YouTube player with isPlaying
+  useEffect(() => {
+    if (!isYouTube || !ytPlayerRef.current) return;
+    if (isPlaying) {
+      playYouTube();
+    } else {
+      pauseYouTube();
+    }
+  }, [isPlaying, isYouTube]);
+
+  const tagCurrent = () => {
+    if (lines.length === 0 || activeIndex.line >= lines.length) return;
+    
+    let time = 0;
+    if (isYouTubeUrl(audioUrl) && ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function') {
+      time = ytPlayerRef.current.getCurrentTime();
+    } else if (playerRef.current) {
+      time = playerRef.current.currentTime;
+    }
+    
+    // Deep clone line before mutation
+    const newLines = lines.map(line => ({
+      ...line,
+      words: line.words ? line.words.map(w => ({...w})) : []
+    }));
+    const { line, word } = activeIndex;
+
+    if (formatMode === 'A1') {
+      newLines[line].time = time;
+      setLines(newLines);
+      setActiveIndex({ line: Math.min(line + 1, lines.length - 1), word: 0 });
+    } else {
+      newLines[line].words[word].time = time;
+      if (word === 0) newLines[line].time = time;
+      
+      setLines(newLines);
+      if (word + 1 < newLines[line].words.length) {
+        setActiveIndex({ line, word: word + 1 });
+      } else {
+        setActiveIndex({ line: Math.min(line + 1, lines.length - 1), word: 0 });
+      }
+    }
+  };
+
+  const untagPrevious = () => {
+    if (lines.length === 0) return;
+
+    // Deep clone line before mutation
+    const newLines = lines.map(line => ({
+      ...line,
+      words: line.words ? line.words.map(w => ({...w})) : []
+    }));
+    
+    if (formatMode === 'A1') {
+      let l = activeIndex.line;
+      if (l === lines.length || newLines[l]?.time === null) l = Math.max(0, l - 1);
+      if (newLines[l]) newLines[l].time = null;
+      setLines(newLines);
+      setActiveIndex({ line: l, word: 0 });
+    } else {
+      let l = activeIndex.line;
+      let w = activeIndex.word;
+      
+      if (l === lines.length || newLines[l]?.words[w]?.time === null) {
+        w -= 1;
+        if (w < 0) {
+          l = Math.max(0, l - 1);
+          w = Math.max(0, newLines[l]?newLines[l].words.length - 1:0);
+        }
+      }
+      if (newLines[l] && newLines[l].words[w]) {
+        newLines[l].words[w].time = null;
+        if (w === 0) newLines[l].time = null;
+      }
+      setLines(newLines);
+      setActiveIndex({ line: l, word: w });
+    }
+  };
+
+  const moveCursor = (dir) => {
+    if (formatMode === 'A1') {
+      setActiveIndex(prev => ({ ...prev, line: Math.max(0, Math.min(lines.length - 1, prev.line + dir)) }));
+    } else {
+      setActiveIndex(prev => {
+        let l = prev.line;
+        let w = prev.word + dir;
+        if (w >= lines[l].words.length) {
+          l = Math.min(lines.length - 1, l + 1);
+          w = 0;
+        } else if (w < 0) {
+          l = Math.max(0, l - 1);
+          w = lines[l].words.length - 1;
+        }
+        return { line: l, word: w };
+      });
+    }
+  };
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      setAudioUrl(URL.createObjectURL(file));
+      // Don't auto-play, let user click play
+      if (!metadata.title) setMetadata(p => ({ ...p, title: file.name.split('.')[0] }));
+    }
+  };
+
+  const handlePlayPause = () => {
+    setIsPlaying(p => !p);
+  };
+
+  const exportLrc = () => {
+    let out = `[ti:${metadata.title}]\n[ar:${metadata.artist}]\n[al:${metadata.album}]\n`;
+    out += `[by:${metadata.by}]\n`;
+    out += `[re:adielbm.github.io/lrc-generator]\n`;
+    out += `[ve:${process.env.NEXT_PUBLIC_APP_VERSION || 'dev'}]\n`;
+    const exportDuration = isYouTube
+      ? duration
+      : (playerRef.current ? playerRef.current.duration || 0 : duration);
+    const durStr = formatTime(exportDuration || 0);
+    out += `[length:${durStr}]\n`;
+
+    const commentLines = metadata.comments
+      .split('\n')
+      .map(line => line.trim())
+      .filter(Boolean);
+
+    commentLines.forEach(comment => {
+      out += `#${comment}\n`;
+    });
+
+    lines.forEach(l => {
+      if (l.time !== null) {
+        if (formatMode === 'A1') {
+          out += `[${formatTime(l.time)}]${l.text}\n`;
+        } else {
+          out += `[${formatTime(l.time)}]`;
+          l.words.forEach(w => {
+            if (w.time !== null) out += `<${formatTime(w.time)}>${w.text}`;
+            else out += `${w.text}`;
+            out += ' ';
+          });
+          out = out.trimEnd() + '\n';
+        }
+      }
+    });
+
+    const blob = new Blob([out], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${metadata.title || 'lyrics'}.lrc`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
-    <div>
+    <div className="flex flex-col h-screen font-sans text-gray-900 bg-white dark:text-gray-100 dark:bg-gray-900 transition-colors">
       <Head>
-        <title>LRC generator</title>
-        <meta
-          name="description"
-          content="A nice tool for creating LRC files. (synced lyrics)"
-        />
-        <link rel="icon" href="/favicon.ico" />
-        <link
-          rel="stylesheet"
-          href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css"
-          integrity="sha384-1BmE4kWBq78iYhFldvKuhfTAU6auU8tT94WrHftjDbrCEXSU1oBoqyl2QvZ6jIW3"
-          crossOrigin="anonymous"
-        ></link>
+        <title>Minimal LRC Generator</title>
       </Head>
 
-      <main>
-        <LyricsContext.Provider value={value}>
-          <Audiotime.Provider value={valueAudiotime}>
-            <div>
-              <div className="flex items-center bg-[#5499ff] p-2 gap-2 justify-center sticky top-0 shadow-xl">
-                <div className="w-44 text-2xl font-bold flex justify-items-center align-middle">
-                  {titleSong ? titleSong : ""}
-                </div>
-                <audio
-                  onTimeUpdate={handleTimeUpdate}
-                  ref={audioEl}
-                  id="audio"
-                  className="w-7/12"
-                  controls
-                >
-                  <source src={audio}></source>
-                </audio>
+      {/* Header Bar */}
+      <header className="flex-none px-4 md:px-6 py-4 border-b border-gray-200 dark:border-gray-800 flex flex-col lg:flex-row gap-3 md:gap-4 items-stretch lg:items-center justify-between">
+        <div className="w-full lg:w-auto flex items-center justify-between">
+          <h1 className="text-xl font-bold tracking-tight text-left">LRC Generator</h1>
+          <div className="md:hidden flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setMobilePanelType('tags')}
+              className="inline-flex items-center px-3 py-1.5 rounded-md border border-gray-300 dark:border-gray-700 text-sm"
+            >
+              Edit Tags
+            </button>
+            <button
+              type="button"
+              onClick={() => setMobilePanelType('lyrics')}
+              className="inline-flex items-center px-3 py-1.5 rounded-md border border-gray-300 dark:border-gray-700 text-sm"
+            >
+              Add Lyrics
+            </button>
+          </div>
+        </div>
+        
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 sm:gap-3 w-full lg:flex-1 lg:max-w-xl">
+          <div className="flex bg-gray-100 dark:bg-gray-800 rounded-lg overflow-hidden w-full">
+            <input 
+              type="text" 
+              placeholder="Audio URL (.mp3, .wav) or YouTube URL..." 
+              className="bg-transparent px-4 py-2 w-full outline-none text-sm"
+              value={ytInput}
+              onChange={e => setYtInput(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && setAudioUrl(ytInput)}
+            />
+            <button onClick={() => setAudioUrl(ytInput)} className="px-3 hover:bg-gray-200 dark:hover:bg-gray-700 transition">
+              <LinkIcon size={16} />
+            </button>
+          </div>
+          <span className="text-xs sm:text-sm font-medium opacity-50 text-center hidden sm:inline">or</span>
+          <label className="cursor-pointer bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg text-sm font-medium flex items-center justify-center gap-2 transition whitespace-nowrap">
+            <Upload size={16} /> Local File
+            <input type="file" accept="audio/*" onChange={handleFileUpload} className="hidden" />
+          </label>
+        </div>
 
-                <div>
-                  {/* label for playback rate*/}
-                  <div className="text-xl text-center">Speed</div>
-                  {/* input for playback rate */}
-                  <input
-                    onChange={(e) => changePlaybackRate(e.target.value)}
-                    type="range"
-                    min="1"
-                    max="3"
-                    step="0.5"
-                    defaultValue="2"
-                    className="w-28"
-                  />
-                </div>
+        <div className="w-full lg:w-auto flex flex-wrap items-center justify-center lg:justify-end gap-2">
+           <button 
+             className={`px-3 py-1.5 rounded-md text-sm font-medium border whitespace-nowrap ${formatMode === 'A1' ? 'border-blue-500 text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/30' : 'border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 opacity-60'}`}
+             onClick={() => setFormatMode('A1')}
+           >
+             Simple
+             <small className="ml-1 px-1 text-gray-900 dark:text-gray-100 rounded">(by lines)</small>
+           </button>
+           <button 
+             className={`px-3 py-1.5 rounded-md text-sm font-medium border whitespace-nowrap ${formatMode === 'A2' ? 'border-purple-500 text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/30' : 'border-gray-200 dark:border-gray-700 hover:bg-gray-100 dark:hover:bg-gray-800 opacity-60'}`}
+             onClick={() => setFormatMode('A2')}
+           >
+             Enhanced (A2)
+              <small className="ml-1 px-1 text-gray-900 dark:text-gray-100 rounded">(by words)</small>
+           </button>
+           <button onClick={exportLrc} className="bg-green-600 hover:bg-green-700 text-white px-4 py-1.5 rounded-md text-sm font-medium flex items-center gap-2 transition whitespace-nowrap">
+             <Download size={16} /> Export
+           </button>
+        </div>
+      </header>
 
-                <br />
-                <label className="relative btn btn-primary rounded-full btn-file cursor-pointer">
-                  Upload Song
-                  <input
-                    type="file"
-                    onChange={addFile}
-                    id="file"
-                    accept="audio/*"
-                    className="cursor-pointer"
-                  />
-                </label>
+      {/* Main split view */}
+      <div className="flex flex-col md:flex-row flex-1 md:overflow-hidden overflow-y-auto">
+        {mobilePanelType && (
+          <div
+            className="fixed inset-0 bg-black/40 z-30 md:hidden"
+            onClick={() => setMobilePanelType(null)}
+          />
+        )}
+
+        {/* Left pane: metadata and raw text input */}
+        <section
+          className={`w-[88vw] max-w-sm md:max-w-none md:w-1/3 border-r md:border-b-0 border-gray-200 dark:border-gray-800 p-4 md:p-6 flex flex-col gap-4 overflow-y-auto bg-white dark:bg-gray-900 md:bg-transparent fixed inset-y-0 left-0 z-40 transform transition-transform duration-200 md:static md:translate-x-0 ${mobilePanelType ? 'translate-x-0' : '-translate-x-full'}`}
+        >
+          <div className="md:hidden flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-200">{mobilePanelType === 'lyrics' ? 'Add Lyrics' : 'Edit Tags'}</h2>
+            <button
+              type="button"
+              onClick={() => setMobilePanelType(null)}
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-gray-300 dark:border-gray-700 text-sm"
+            >
+              <X size={14} />
+              Close
+            </button>
+          </div>
+
+          <div className={`${mobilePanelType === 'lyrics' ? 'hidden md:block' : ''}`}>
+            <h2 className="text-xs uppercase tracking-wider text-gray-500 font-semibold mb-2">Song Info</h2>
+            <div className="space-y-2 text-sm">
+              <input className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-800 rounded-md outline-none focus:ring-1 focus:ring-blue-500" placeholder="Title" value={metadata.title} onChange={e => setMetadata({...metadata, title: e.target.value})} />
+              <input className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-800 rounded-md outline-none focus:ring-1 focus:ring-blue-500" placeholder="Artist" value={metadata.artist} onChange={e => setMetadata({...metadata, artist: e.target.value})} />
+              <input className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-800 rounded-md outline-none focus:ring-1 focus:ring-blue-500" placeholder="Album" value={metadata.album} onChange={e => setMetadata({...metadata, album: e.target.value})} />
+              <input className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-800 rounded-md outline-none focus:ring-1 focus:ring-blue-500" placeholder="LRC Author (by)" value={metadata.by} onChange={e => setMetadata({...metadata, by: e.target.value})} />
+              <textarea className="w-full px-3 py-2 bg-gray-50 dark:bg-gray-800 rounded-md outline-none focus:ring-1 focus:ring-blue-500 resize-y min-h-20" placeholder="Comments (one per line, exported as #...)" value={metadata.comments} onChange={e => setMetadata({...metadata, comments: e.target.value})} />
+            </div>
+          </div>
+
+          <div className={`flex-1 flex flex-col ${mobilePanelType === 'tags' ? 'hidden md:flex' : ''}`}>
+            <h2 className="text-xs uppercase tracking-wider text-gray-500 font-semibold mb-2">1. Paste Lyrics</h2>
+            {showEditMode ? (
+              <div className="flex flex-col gap-2 h-full">
+                <textarea 
+                  className="flex-1 w-full bg-gray-50 dark:bg-gray-800 rounded-md outline-none p-3 text-sm resize-none focus:ring-1 focus:ring-blue-500 leading-relaxed"
+                  placeholder="Paste raw text here..."
+                  value={rawText}
+                  onChange={e => setRawText(e.target.value)}
+                />
                 <button
-                  onClick={handleExportFile}
-                  className="btn btn-success rounded-full"
+                  onClick={() => setShowEditMode(false)}
+                  disabled={!rawText.trim()}
+                  className={`px-4 py-2 rounded-md font-semibold text-sm transition ${rawText.trim() ? 'bg-blue-600 hover:bg-blue-700 text-white' : 'bg-gray-300 text-gray-500 cursor-not-allowed'}`}
                 >
-                  Export LRC file
+                  Load Lyrics
                 </button>
-                {/* github icon */}
-
-                <a
-                  href="https://github.com/adielBm/lrc-generator"
-                  target="_blank"
-                  rel="noreferrer"
-                  className="btn bg-slate-700 hover:bg-slate-900 text-gray-200 hover:text-gray-200 rounded-full"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    width="24"
-                    height="24"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    className="lucide lucide-github"
-                  >
-                    <path d="M15 22v-4a4.8 4.8 0 0 0-1-3.5c3 0 6-2 6-5.5.08-1.25-.27-2.48-1-3.5.28-1.15.28-2.35 0-3.5 0 0-1 0-3 1.5-2.64-.5-5.36-.5-8 0C6 2 5 2 5 2c-.3 1.15-.3 2.35 0 3.5A5.403 5.403 0 0 0 4 9c0 3.5 3 5.5 6 5.5-.39.49-.68 1.05-.85 1.65-.17.6-.22 1.23-.15 1.85v4" />
-                    <path d="M9 18c-4.51 2-5-2-7-2" />
-                  </svg>
-                </a>
               </div>
-              <div className="grid grid-cols-4 min-h-[90vh]">
-                <div className="bg-[#a5c9ff] p-4 min-h-screen space-y-4">
-                  {/* input text for title of song */}
+            ) : (
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowEditMode(true)}
+                  className="px-4 py-2 rounded-md font-semibold text-sm bg-gray-200 dark:bg-gray-700 text-gray-900 dark:text-gray-100 hover:bg-gray-300 dark:hover:bg-gray-600 transition"
+                >
+                  Edit Lyrics
+                </button>
+                <span className="text-xs text-gray-500 dark:text-gray-400 self-center">
+                  {lines.length} lines loaded
+                </span>
+              </div>
+            )}
+          </div>
 
-                  <input
-                    onChange={(e) => setTitleSong(e.target.value)}
-                    value={titleSong}
-                    placeholder="Title"
-                    className="p-2 outline-none rounded-lg w-full"
-                  />
-                  {/* input text for album and artist of song */}
-                  <input
-                    onChange={(e) => setAlbumSong(e.target.value)}
-                    placeholder="Album"
-                    className="p-2 outline-none rounded-lg w-full"
-                  />
-                  <input
-                    onChange={(e) => setArtistSong(e.target.value)}
-                    placeholder="Artist"
-                    className="p-2 outline-none rounded-lg w-full"
-                  />
-                  {/* button for add line */}
-                  <button
-                    onClick={copyTextToLyrics}
-                    className="btn btn-primary rounded-full w-full"
-                  >
-                    Start Editing
-                  </button>
-                  <textarea
-                    className="p-2 h-screen w-full outline-none rounded-lg"
-                    ref={textareaEl}
-                    placeholder="Insert lyrics here"
-                  ></textarea>
+          <div className="hidden md:block bg-gray-100 dark:bg-gray-800/50 p-4 rounded-xl text-xs space-y-2">
+            <div className="flex flex-wrap gap-2 text-gray-500 dark:text-gray-400">
+              <p><kbd className="text-white dark:text-black bg-blue-700 dark:bg-blue-300 px-1 py-0.5 rounded shadow-sm border border-blue-200 dark:border-blue-600">Enter</kbd> or <kbd className="bg-white dark:bg-gray-700 px-1 py-0.5 rounded shadow-sm border border-gray-200 dark:border-gray-600">Tag</kbd> Tag time</p>
+              <p><kbd className="bg-white dark:bg-gray-700 px-1 py-0.5 rounded shadow-sm border border-gray-200 dark:border-gray-600">Space</kbd> Play/Pause</p>
+              <p><kbd className="bg-white dark:bg-gray-700 px-1 py-0.5 rounded shadow-sm border border-gray-200 dark:border-gray-600">Back/Del</kbd> Undo</p>
+              <p><kbd className="bg-white dark:bg-gray-700 px-1 py-0.5 rounded shadow-sm border border-gray-200 dark:border-gray-600">←</kbd> <kbd className="bg-white dark:bg-gray-700 px-1 py-0.5 rounded shadow-sm border border-gray-200 dark:border-gray-600">→</kbd> Seek</p>
+              <p><kbd className="bg-white dark:bg-gray-700 px-1 py-0.5 rounded shadow-sm border border-gray-200 dark:border-gray-600">↑</kbd> <kbd className="bg-white dark:bg-gray-700 px-1 py-0.5 rounded shadow-sm border border-gray-200 dark:border-gray-600">↓</kbd> Move cursor</p>
+            </div>
+          </div>
+        </section>
+
+        {/* Right pane: Audio player and tagger */}
+        <section className="w-full md:flex-1 min-h-[58vh] md:min-h-0 flex flex-col relative bg-gray-50 dark:bg-transparent">
+          
+          {audioUrl && (
+            <div className="bg-white dark:bg-gray-900 border-b border-gray-200 dark:border-gray-800 p-4 flex flex-wrap items-center justify-between gap-4 z-10 shadow-sm">
+              <audio
+                ref={playerRef}
+                src={!isYouTube ? audioUrl : undefined}
+                crossOrigin="anonymous"
+                onTimeUpdate={(e) => {
+                  if (!isYouTube) {
+                    setCurrentTime(e.currentTarget.currentTime);
+                    setDuration(e.currentTarget.duration);
+                  }
+                }}
+                onLoadedMetadata={(e) => {
+                  if (!isYouTube) {
+                    setDuration(e.currentTarget.duration);
+                  }
+                }}
+              />
+              <button 
+                onClick={handlePlayPause}
+                className="w-12 h-12 flex items-center justify-center bg-blue-600 hover:bg-blue-700 text-white rounded-full transition shadow-md shrink-0"
+                aria-label={isPlaying ? 'Pause' : 'Play'}
+              >
+                {isPlaying ? <Pause size={20} fill="currentColor"/> : <Play size={20} fill="currentColor" className="ml-1"/>}
+              </button>
+
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={tagCurrent}
+                  disabled={showEditMode || lines.length === 0}
+                  className={`hidden md:inline-flex px-3 py-2 rounded-md text-sm font-semibold transition ${showEditMode || lines.length === 0 ? 'bg-gray-200 dark:bg-gray-800 text-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}
+                >
+                  Tag
+                </button>
+                <button
+                  onClick={untagPrevious}
+                  disabled={showEditMode || lines.length === 0}
+                  className={`hidden md:inline-flex px-3 py-2 rounded-md text-sm font-medium transition ${showEditMode || lines.length === 0 ? 'bg-gray-200 dark:bg-gray-800 text-gray-400 cursor-not-allowed' : 'bg-gray-200 hover:bg-gray-300 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-800 dark:text-gray-100'}`}
+                >
+                  Undo
+                </button>
+              </div>
+              
+              <div className="order-last md:order-none basis-full md:basis-auto md:flex-1 flex flex-col">
+                <div className="flex justify-between text-xs mb-1 font-mono text-gray-500">
+                  <span>{formatTime(currentTime)}</span>
+                  <span>{formatTime(duration || 0)}</span>
                 </div>
-                <LinesTable />
+                <div 
+                  className="bg-gray-200 dark:bg-gray-800 h-2 rounded-full overflow-hidden cursor-pointer"
+                  onClick={e => {
+                      const rect = e.currentTarget.getBoundingClientRect();
+                      const ratio = (e.clientX - rect.left) / rect.width;
+                      const seekTime = ratio * (duration || 0);
+                      if (isYouTube) {
+                        seekYouTube(seekTime);
+                      } else if (playerRef.current) {
+                        playerRef.current.currentTime = seekTime;
+                      }
+                  }}
+                >
+                  <div 
+                    className="bg-blue-600 h-full transition-all duration-75" 
+                    style={{ width: `${(currentTime / (duration || 1)) * 100}%` }}
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 text-sm">
+                <span className="text-gray-400 font-mono">Speed</span>
+                <select 
+                  value={playbackRate} 
+                  onChange={e => setPlaybackRate(parseFloat(e.target.value))}
+                  disabled={isYouTube}
+                  className={`bg-gray-100 dark:bg-gray-800 px-2 py-1 rounded-md outline-none ${isYouTube ? 'opacity-50 cursor-not-allowed' : ''}`}
+                >
+                  {[0.5, 0.75, 1, 1.25, 1.5, 2].map(r => <option key={r} value={r}>{r}x</option>)}
+                </select>
+              </div>
+
+              <div className="w-full md:hidden flex items-center gap-2">
+                <button
+                  onClick={tagCurrent}
+                  disabled={showEditMode || lines.length === 0}
+                  className={`flex-1 px-3 py-2 rounded-md text-sm font-semibold transition ${showEditMode || lines.length === 0 ? 'bg-gray-200 dark:bg-gray-800 text-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}
+                >
+                  Tag
+                </button>
+                <button
+                  onClick={untagPrevious}
+                  disabled={showEditMode || lines.length === 0}
+                  className={`flex-1 px-3 py-2 rounded-md text-sm font-medium transition ${showEditMode || lines.length === 0 ? 'bg-gray-200 dark:bg-gray-800 text-gray-400 cursor-not-allowed' : 'bg-gray-200 hover:bg-gray-300 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-800 dark:text-gray-100'}`}
+                >
+                  Undo
+                </button>
               </div>
             </div>
-          </Audiotime.Provider>
-        </LyricsContext.Provider>
-      </main>
+          )}
+
+          <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 md:p-8 text-lg md:text-xl leading-relaxed space-y-4">
+            <div
+              id="yt-player"
+              className={`w-full mb-6 rounded-lg overflow-hidden shadow-lg bg-black ${isYouTube ? 'block' : 'hidden'}`}
+              style={{ height: isYouTube ? '400px' : '0px', maxWidth: '100%' }}
+            />
+            
+            {!showEditMode && !lines.length && (
+              <div className="h-full flex items-center justify-center text-gray-400">
+                Load lyrics to begin tagging →
+              </div>
+            )}
+            
+            {lines.map((l, i) => {
+              const isPlayingLine = currentPlayingLine === i;
+              return (
+              <div 
+                key={i} 
+                className={`p-3 rounded-xl transition-all border-2 ${l.time !== null ? 'cursor-pointer' : ''}
+                  ${isPlayingLine && formatMode === 'A1' ? 'border-green-500 bg-green-50/50 dark:bg-green-900/20 shadow-md' : ''}
+                  ${formatMode === 'A1' && activeIndex.line === i && !isPlayingLine ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-900/20 active-tag scale-[1.01] shadow-sm' : ''}
+                  ${formatMode === 'A1' && activeIndex.line !== i && !isPlayingLine ? 'border-transparent hover:bg-gray-100 dark:hover:bg-gray-800/50' : ''}`}
+                onClick={() => {
+                  setActiveIndex({ line: i, word: 0 });
+                  if (l.time !== null) {
+                    if (isYouTube) {
+                      seekYouTube(l.time);
+                    } else if (playerRef.current) {
+                      playerRef.current.currentTime = l.time;
+                    }
+                    setIsPlaying(true);
+                  }
+                }}
+              >
+                <span className={`inline-block w-[110px] font-mono text-sm tracking-wide mr-6
+                  ${isPlayingLine ? 'text-green-600 dark:text-green-400 font-semibold opacity-100' : ''}
+                  ${!isPlayingLine && l.time !== null ? 'text-blue-600 dark:text-blue-400 font-semibold opacity-100' : ''}
+                  ${!isPlayingLine && l.time === null ? 'text-gray-400 dark:text-gray-600' : ''}`}>
+                  {l.time !== null ? `[${formatTime(l.time)}]` : '[--:--.--]'}
+                </span>
+                
+                {formatMode === 'A1' ? (
+                  <span className={`font-medium ${!isPlayingLine && l.time !== null ? 'opacity-100 text-gray-900 dark:text-gray-100' : ''} ${!isPlayingLine && l.time === null ? 'opacity-60 text-gray-500 dark:text-gray-400' : ''}`}>
+                    {l.text}
+                  </span>
+                ) : (
+                  <span className="font-medium">
+                    {l.words.map((w, wi) => {
+                      const isActiveTag = activeIndex.line === i && activeIndex.word === wi;
+                      const hasTime = w.time !== null;
+                      const isPlayingWord = currentPlayingWord && currentPlayingWord.line === i && currentPlayingWord.word === wi;
+                      return (
+                        <span 
+                          key={wi}
+                          onClick={(e) => { 
+                            e.stopPropagation(); 
+                            setActiveIndex({ line: i, word: wi });
+                            if (w.time !== null) {
+                              if (isYouTube) {
+                                seekYouTube(w.time);
+                              } else if (playerRef.current) {
+                                playerRef.current.currentTime = w.time;
+                              }
+                              setIsPlaying(true);
+                            }
+                          }}
+                          className={`inline-block px-1 rounded-md mr-1 cursor-pointer transition-all
+                            ${isPlayingWord ? 'bg-green-500 text-white shadow-lg' : ''}
+                            ${isActiveTag && !isPlayingWord ? 'bg-purple-500 text-white shadow-md active-tag -translate-y-[1px]' : ''}
+                            ${hasTime && !isActiveTag && !isPlayingWord ? 'text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/30' : ''}
+                            ${!hasTime && !isActiveTag && !isPlayingWord ? 'text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700' : ''}
+                          `}
+                        >
+                          {w.text}
+                        </span>
+                      );
+                    })}
+                  </span>
+                )}
+              </div>
+              );
+            })}
+          </div>
+        </section>
+      </div>
     </div>
   );
 }

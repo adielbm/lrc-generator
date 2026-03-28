@@ -32,14 +32,3 @@ First, run the server:
 npm install
 npm run dev
 ```
-
-## GitHub Pages
-This project is configured to deploy automatically to GitHub Pages when `main` is updated.
-
-1. In GitHub, open repository settings.
-2. Go to Pages.
-3. Set Source to `GitHub Actions`.
-4. Push to `main` (or run the Deploy workflow manually).
-
-Your site will be published at:
-`https://adielbm.github.io/lrc-generator/`

@@ -1,5 +1,5 @@
 import Head from 'next/head';
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { Upload, Link as LinkIcon, Download, Play, Pause, X } from 'lucide-react';
 
 function formatTime(seconds) {
@@ -35,6 +35,8 @@ export default function Home() {
   const [rawText, setRawText] = useState('');
   const [lines, setLines] = useState([]);
   const [activeIndex, setActiveIndex] = useState({ line: 0, word: 0 });
+  const [lineTagHistory, setLineTagHistory] = useState([]);
+  const [wordTagHistory, setWordTagHistory] = useState([]);
   const [showEditMode, setShowEditMode] = useState(true); // True = show textarea, False = show edit button
   const [mobilePanelType, setMobilePanelType] = useState(null); // 'tags' | 'lyrics' | null
 
@@ -84,36 +86,6 @@ export default function Home() {
       ytPlayerRef.current.pauseVideo();
     }
   };
-
-  // Memoized: Find current playing word (A2 mode)
-  const currentPlayingWord = useMemo(() => {
-    if (!isPlaying || formatMode !== 'A2') return null;
-    
-    let active = null;
-    for (let i = 0; i < lines.length; i++) {
-      for (let j = 0; j < lines[i].words.length; j++) {
-        const word = lines[i].words[j];
-        if (word.time !== null && currentTime >= word.time - 0.1) {
-          active = { line: i, word: j };
-        }
-      }
-    }
-    return active;
-  }, [isPlaying, currentTime, lines, formatMode]);
-
-  // Memoized: Find current playing line (A1 mode) 
-  const currentPlayingLine = useMemo(() => {
-    if (!isPlaying || formatMode !== 'A1') return null;
-    
-    let active = null;
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      if (line.time !== null && currentTime >= line.time - 0.1) {
-        active = i;
-      }
-    }
-    return active;
-  }, [isPlaying, currentTime, lines, formatMode]);
 
   // YouTube API initialization
   useEffect(() => {
@@ -209,6 +181,8 @@ export default function Home() {
       });
       setLines(newLines);
       setActiveIndex({ line: 0, word: 0 });
+      setLineTagHistory([]);
+      setWordTagHistory([]);
     }
   }, [showEditMode, rawText]);
 
@@ -228,29 +202,6 @@ export default function Home() {
       } else if (e.code === 'Enter') {
         e.preventDefault();
         tagCurrent();
-      } else if (e.code === 'Backspace' || e.code === 'Delete') {
-        e.preventDefault();
-        untagPrevious();
-      } else if (e.code === 'ArrowDown') {
-        e.preventDefault();
-        moveCursor(1);
-      } else if (e.code === 'ArrowUp') {
-        e.preventDefault();
-        moveCursor(-1);
-      } else if (e.code === 'ArrowLeft') {
-        e.preventDefault();
-        if (isYouTubeUrl(audioUrl)) {
-          seekYouTube(getYouTubeCurrentTime() - 2);
-        } else if (playerRef.current) {
-           playerRef.current.currentTime = Math.max(0, playerRef.current.currentTime - 2);
-        }
-      } else if (e.code === 'ArrowRight') {
-        e.preventDefault();
-        if (isYouTubeUrl(audioUrl)) {
-          seekYouTube(getYouTubeCurrentTime() + 2);
-        } else if (playerRef.current) {
-           playerRef.current.currentTime = playerRef.current.currentTime + 2;
-        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -262,7 +213,7 @@ export default function Home() {
       const activeEl = scrollRef.current.querySelector('.active-tag');
       if (activeEl) activeEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
-  }, [activeIndex]);
+  }, [lineTagHistory, wordTagHistory, formatMode]);
 
   // Setup audio element event listeners - runs after audio is mounted
   useEffect(() => {
@@ -345,12 +296,14 @@ export default function Home() {
     if (formatMode === 'A1') {
       newLines[line].time = time;
       setLines(newLines);
+      setLineTagHistory(prev => [...prev, line]);
       setActiveIndex({ line: Math.min(line + 1, lines.length - 1), word: 0 });
     } else {
       newLines[line].words[word].time = time;
       if (word === 0) newLines[line].time = time;
       
       setLines(newLines);
+      setWordTagHistory(prev => [...prev, { line, word }]);
       if (word + 1 < newLines[line].words.length) {
         setActiveIndex({ line, word: word + 1 });
       } else {
@@ -359,58 +312,25 @@ export default function Home() {
     }
   };
 
-  const untagPrevious = () => {
-    if (lines.length === 0) return;
+  const tagLineAtCurrentTime = (lineIndex) => {
+    if (lines.length === 0 || lineIndex < 0 || lineIndex >= lines.length) return;
 
-    // Deep clone line before mutation
+    let time = 0;
+    if (isYouTubeUrl(audioUrl) && ytPlayerRef.current && typeof ytPlayerRef.current.getCurrentTime === 'function') {
+      time = ytPlayerRef.current.getCurrentTime();
+    } else if (playerRef.current) {
+      time = playerRef.current.currentTime;
+    }
+
     const newLines = lines.map(line => ({
       ...line,
-      words: line.words ? line.words.map(w => ({...w})) : []
+      words: line.words ? line.words.map(w => ({ ...w })) : []
     }));
-    
-    if (formatMode === 'A1') {
-      let l = activeIndex.line;
-      if (l === lines.length || newLines[l]?.time === null) l = Math.max(0, l - 1);
-      if (newLines[l]) newLines[l].time = null;
-      setLines(newLines);
-      setActiveIndex({ line: l, word: 0 });
-    } else {
-      let l = activeIndex.line;
-      let w = activeIndex.word;
-      
-      if (l === lines.length || newLines[l]?.words[w]?.time === null) {
-        w -= 1;
-        if (w < 0) {
-          l = Math.max(0, l - 1);
-          w = Math.max(0, newLines[l]?newLines[l].words.length - 1:0);
-        }
-      }
-      if (newLines[l] && newLines[l].words[w]) {
-        newLines[l].words[w].time = null;
-        if (w === 0) newLines[l].time = null;
-      }
-      setLines(newLines);
-      setActiveIndex({ line: l, word: w });
-    }
-  };
 
-  const moveCursor = (dir) => {
-    if (formatMode === 'A1') {
-      setActiveIndex(prev => ({ ...prev, line: Math.max(0, Math.min(lines.length - 1, prev.line + dir)) }));
-    } else {
-      setActiveIndex(prev => {
-        let l = prev.line;
-        let w = prev.word + dir;
-        if (w >= lines[l].words.length) {
-          l = Math.min(lines.length - 1, l + 1);
-          w = 0;
-        } else if (w < 0) {
-          l = Math.max(0, l - 1);
-          w = lines[l].words.length - 1;
-        }
-        return { line: l, word: w };
-      });
-    }
+    newLines[lineIndex].time = time;
+    setLines(newLines);
+    setLineTagHistory(prev => [...prev, lineIndex]);
+    setActiveIndex({ line: Math.min(lineIndex + 1, lines.length - 1), word: 0 });
   };
 
   const handleFileUpload = (e) => {
@@ -614,9 +534,6 @@ export default function Home() {
             <div className="flex flex-wrap gap-2 text-gray-500 dark:text-gray-400">
               <p><kbd className="text-white dark:text-black bg-blue-700 dark:bg-blue-300 px-1 py-0.5 rounded shadow-sm border border-blue-200 dark:border-blue-600">Enter</kbd> or <kbd className="bg-white dark:bg-gray-700 px-1 py-0.5 rounded shadow-sm border border-gray-200 dark:border-gray-600">Tag</kbd> Tag time</p>
               <p><kbd className="bg-white dark:bg-gray-700 px-1 py-0.5 rounded shadow-sm border border-gray-200 dark:border-gray-600">Space</kbd> Play/Pause</p>
-              <p><kbd className="bg-white dark:bg-gray-700 px-1 py-0.5 rounded shadow-sm border border-gray-200 dark:border-gray-600">Back/Del</kbd> Undo</p>
-              <p><kbd className="bg-white dark:bg-gray-700 px-1 py-0.5 rounded shadow-sm border border-gray-200 dark:border-gray-600">←</kbd> <kbd className="bg-white dark:bg-gray-700 px-1 py-0.5 rounded shadow-sm border border-gray-200 dark:border-gray-600">→</kbd> Seek</p>
-              <p><kbd className="bg-white dark:bg-gray-700 px-1 py-0.5 rounded shadow-sm border border-gray-200 dark:border-gray-600">↑</kbd> <kbd className="bg-white dark:bg-gray-700 px-1 py-0.5 rounded shadow-sm border border-gray-200 dark:border-gray-600">↓</kbd> Move cursor</p>
             </div>
           </div>
         </section>
@@ -657,13 +574,6 @@ export default function Home() {
                   className={`hidden md:inline-flex px-3 py-2 rounded-md text-sm font-semibold transition ${showEditMode || lines.length === 0 ? 'bg-gray-200 dark:bg-gray-800 text-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}
                 >
                   Tag
-                </button>
-                <button
-                  onClick={untagPrevious}
-                  disabled={showEditMode || lines.length === 0}
-                  className={`hidden md:inline-flex px-3 py-2 rounded-md text-sm font-medium transition ${showEditMode || lines.length === 0 ? 'bg-gray-200 dark:bg-gray-800 text-gray-400 cursor-not-allowed' : 'bg-gray-200 hover:bg-gray-300 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-800 dark:text-gray-100'}`}
-                >
-                  Undo
                 </button>
               </div>
               
@@ -712,13 +622,6 @@ export default function Home() {
                 >
                   Tag
                 </button>
-                <button
-                  onClick={untagPrevious}
-                  disabled={showEditMode || lines.length === 0}
-                  className={`flex-1 px-3 py-2 rounded-md text-sm font-medium transition ${showEditMode || lines.length === 0 ? 'bg-gray-200 dark:bg-gray-800 text-gray-400 cursor-not-allowed' : 'bg-gray-200 hover:bg-gray-300 dark:bg-gray-800 dark:hover:bg-gray-700 text-gray-800 dark:text-gray-100'}`}
-                >
-                  Undo
-                </button>
               </div>
             </div>
           )}
@@ -737,71 +640,69 @@ export default function Home() {
             )}
             
             {lines.map((l, i) => {
-              const isPlayingLine = currentPlayingLine === i;
+              const lastTaggedLine = lineTagHistory.length > 0 ? lineTagHistory[lineTagHistory.length - 1] : null;
+              const isLastTaggedLine = formatMode === 'A1' && lastTaggedLine === i;
+              const lastTaggedWord = wordTagHistory.length > 0 ? wordTagHistory[wordTagHistory.length - 1] : null;
               return (
-              <div 
-                key={i} 
-                className={`p-3 rounded-xl transition-all border-2 ${l.time !== null ? 'cursor-pointer' : ''}
-                  ${isPlayingLine && formatMode === 'A1' ? 'border-green-500 bg-green-50/50 dark:bg-green-900/20 shadow-md' : ''}
-                  ${formatMode === 'A1' && activeIndex.line === i && !isPlayingLine ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-900/20 active-tag scale-[1.01] shadow-sm' : ''}
-                  ${formatMode === 'A1' && activeIndex.line !== i && !isPlayingLine ? 'border-transparent hover:bg-gray-100 dark:hover:bg-gray-800/50' : ''}`}
-                onClick={() => {
-                  setActiveIndex({ line: i, word: 0 });
-                  if (l.time !== null) {
+              <div key={i} className="flex items-stretch gap-3">
+                <div
+                  className={`w-[110px] shrink-0 font-mono text-sm tracking-wide self-stretch flex items-center px-2 rounded
+                    ${l.time !== null ? 'text-blue-600 dark:text-blue-400 font-semibold opacity-100 cursor-pointer hover:bg-blue-100 dark:hover:bg-blue-900/40' : 'text-gray-400 dark:text-gray-600'}`}
+                  onClick={() => {
+                    if (l.time === null) return;
                     if (isYouTube) {
                       seekYouTube(l.time);
                     } else if (playerRef.current) {
                       playerRef.current.currentTime = l.time;
                     }
                     setIsPlaying(true);
-                  }
-                }}
-              >
-                <span className={`inline-block w-[110px] font-mono text-sm tracking-wide mr-6
-                  ${isPlayingLine ? 'text-green-600 dark:text-green-400 font-semibold opacity-100' : ''}
-                  ${!isPlayingLine && l.time !== null ? 'text-blue-600 dark:text-blue-400 font-semibold opacity-100' : ''}
-                  ${!isPlayingLine && l.time === null ? 'text-gray-400 dark:text-gray-600' : ''}`}>
+                  }}
+                  title={l.time !== null ? 'Jump to this timestamp' : undefined}
+                >
                   {l.time !== null ? `[${formatTime(l.time)}]` : '[--:--.--]'}
-                </span>
-                
-                {formatMode === 'A1' ? (
-                  <span className={`font-medium ${!isPlayingLine && l.time !== null ? 'opacity-100 text-gray-900 dark:text-gray-100' : ''} ${!isPlayingLine && l.time === null ? 'opacity-60 text-gray-500 dark:text-gray-400' : ''}`}>
-                    {l.text}
-                  </span>
-                ) : (
-                  <span className="font-medium">
-                    {l.words.map((w, wi) => {
-                      const isActiveTag = activeIndex.line === i && activeIndex.word === wi;
-                      const hasTime = w.time !== null;
-                      const isPlayingWord = currentPlayingWord && currentPlayingWord.line === i && currentPlayingWord.word === wi;
-                      return (
-                        <span 
-                          key={wi}
-                          onClick={(e) => { 
-                            e.stopPropagation(); 
-                            setActiveIndex({ line: i, word: wi });
-                            if (w.time !== null) {
-                              if (isYouTube) {
-                                seekYouTube(w.time);
-                              } else if (playerRef.current) {
-                                playerRef.current.currentTime = w.time;
-                              }
-                              setIsPlaying(true);
-                            }
-                          }}
-                          className={`inline-block px-1 rounded-md mr-1 cursor-pointer transition-all
-                            ${isPlayingWord ? 'bg-green-500 text-white shadow-lg' : ''}
-                            ${isActiveTag && !isPlayingWord ? 'bg-purple-500 text-white shadow-md active-tag -translate-y-[1px]' : ''}
-                            ${hasTime && !isActiveTag && !isPlayingWord ? 'text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/30' : ''}
-                            ${!hasTime && !isActiveTag && !isPlayingWord ? 'text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700' : ''}
-                          `}
-                        >
-                          {w.text}
-                        </span>
-                      );
-                    })}
-                  </span>
-                )}
+                </div>
+
+                <div 
+                  className={`flex-1 p-3 rounded-xl transition-all border-2 ${formatMode === 'A1' ? 'cursor-pointer hover:bg-blue-50/40 dark:hover:bg-blue-900/10' : ''}
+                    ${isLastTaggedLine ? 'border-blue-500 bg-blue-50/50 dark:bg-blue-900/20 active-tag scale-[1.01] shadow-sm' : ''}
+                    ${!isLastTaggedLine ? 'border-transparent hover:bg-gray-100 dark:hover:bg-gray-800/50' : ''}`}
+                  onClick={() => {
+                    if (formatMode === 'A1') {
+                      tagLineAtCurrentTime(i);
+                      return;
+                    }
+                    setActiveIndex({ line: i, word: 0 });
+                  }}
+                >
+                  {formatMode === 'A1' ? (
+                    <span className={`font-medium ${l.time !== null ? 'opacity-100 text-gray-900 dark:text-gray-100' : 'opacity-60 text-gray-500 dark:text-gray-400'}`}>
+                      {l.text}
+                    </span>
+                  ) : (
+                    <span className="font-medium">
+                      {l.words.map((w, wi) => {
+                        const hasTime = w.time !== null;
+                        const isLastTaggedWord = lastTaggedWord && lastTaggedWord.line === i && lastTaggedWord.word === wi;
+                        return (
+                          <span 
+                            key={wi}
+                            onClick={(e) => { 
+                              e.stopPropagation(); 
+                              setActiveIndex({ line: i, word: wi });
+                            }}
+                            className={`inline-block px-1 rounded-md mr-1 cursor-pointer transition-all
+                              ${isLastTaggedWord ? 'bg-purple-500 text-white shadow-md active-tag -translate-y-[1px]' : ''}
+                              ${hasTime && !isLastTaggedWord ? 'text-purple-600 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/30' : ''}
+                              ${!hasTime && !isLastTaggedWord ? 'text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-gray-700' : ''}
+                            `}
+                          >
+                            {w.text}
+                          </span>
+                        );
+                      })}
+                    </span>
+                  )}
+                </div>
               </div>
               );
             })}
